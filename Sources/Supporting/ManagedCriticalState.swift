@@ -1,20 +1,42 @@
+#if canImport(Darwin)
 import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
-final class LockedBuffer<State>: ManagedBuffer<State, os_unfair_lock> {
+#if canImport(Darwin)
+  typealias Primitive = os_unfair_lock
+#elseif canImport(Glibc)
+  typealias Primitive = pthread_mutex_t
+#else
+  typealias Primitive = Int
+#endif
+
+final class LockedBuffer<State>: ManagedBuffer<State, Primitive> {
   deinit {
     _ = self.withUnsafeMutablePointerToElements { lock in
-      lock.deinitialize(count: 1)
+      #if canImport(Darwin)
+        lock.deinitialize(count: 1)
+      #elseif canImport(Glibc)
+        let result = pthread_mutex_destroy(lock)
+        precondition(result == 0, "pthread_mutex_destroy failed")
+      #endif
     }
   }
 }
 
 struct ManagedCriticalState<State> {
-  let buffer: ManagedBuffer<State, os_unfair_lock>
+  let buffer: ManagedBuffer<State, Primitive>
 
   init(_ initial: State) {
     buffer = LockedBuffer.create(minimumCapacity: 1) { buffer in
       buffer.withUnsafeMutablePointerToElements { lock in
-        lock.initialize(to: os_unfair_lock())
+        #if canImport(Darwin)
+          lock.initialize(to: os_unfair_lock())
+        #elseif canImport(Glibc)
+          let result = pthread_mutex_init(lock, nil)
+          precondition(result == 0, "pthread_mutex_init failed")
+        #endif
       }
       return initial
     }
@@ -25,8 +47,16 @@ struct ManagedCriticalState<State> {
     _ critical: (inout State) throws -> R
   ) rethrows -> R {
     try buffer.withUnsafeMutablePointers { header, lock in
-      os_unfair_lock_lock(lock)
-      defer { os_unfair_lock_unlock(lock) }
+      #if canImport(Darwin)
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+      #elseif canImport(Glibc)
+        pthread_mutex_lock(lock)
+        defer {
+          let result = pthread_mutex_unlock(lock)
+          precondition(result == 0, "pthread_mutex_unlock failed")
+        }
+      #endif
       return try critical(&header.pointee)
     }
   }
